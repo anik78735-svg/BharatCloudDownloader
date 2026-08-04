@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bharatclouddeveloper"
+version = "1.0.0"
+description = "Unified Instagram + TikTok + Facebook Reels/Video Downloader SDK & API by Bharat Cloud Developer"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "Surya Kumar Boss", email = "surya@bharatcloud.dev"}
+]
+keywords = ["instagram", "tiktok", "facebook", "reels", "downloader", "sdk", "api"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Multimedia :: Video",
+]
+
+dependencies = [
+    "httpx>=0.27.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "aiofiles>=24.1.0",
+    "python-multipart>=0.0.9",
+    "pydantic>=2.9.0",
+]
+
+[project.optional-dependencies]
+server = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "aiofiles>=24.1.0",
+]
+
+[project.scripts]
+bharatcloud = "bharatclouddeveloper.cli:main"
+bcd-download = "bharatclouddeveloper.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/bharatclouddeveloper/downloader"
+Documentation = "https://github.com/bharatclouddeveloper/downloader#readme"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["bharatclouddeveloper*"]
