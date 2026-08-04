@@ -1,7 +1,8 @@
 """
 =============================================================
-  Bharat Cloud Developer - Unified Server (Render Ready)
+  Bharat Cloud Developer - Unified Server (Render Ready) v1.1
   Instagram + TikTok + Facebook
+  Fixed: Short URL resolve + better fallbacks + clear errors
 =============================================================
 """
 
@@ -23,14 +24,14 @@ import aiofiles
 
 PORT = int(os.environ.get("PORT", 8000))
 RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "")
-RAPIDAPI_HOST = "instagram-looter2.p.rapidapi.com"
+RAPIDAPI_HOST = "instagram-downloader-download-instagram-stories-videos4.p.rapidapi.com"
 DOWNLOADS_DIR = Path("downloads")
 DOWNLOADS_DIR.mkdir(exist_ok=True)
 
 app = FastAPI(
     title="Bharat Cloud Developer - Unified Downloader",
-    description="Instagram Reels + TikTok + Facebook Multi-Platform Downloader",
-    version="1.0.0",
+    description="Instagram Reels + TikTok + Facebook Multi-Platform Downloader v1.1",
+    version="1.1.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -65,6 +66,9 @@ class DownloadResponse(BaseModel):
     message: Optional[str] = None
 
 
+# ----------------------------------------------------
+# HELPERS
+# ----------------------------------------------------
 def detect_platform(url: str) -> str:
     url_lower = url.lower()
     if "instagram.com" in url_lower or "instagr.am" in url_lower:
@@ -78,9 +82,10 @@ def detect_platform(url: str) -> str:
 
 def extract_instagram_username(url: str) -> Optional[str]:
     patterns = [
-        r"instagram\.com/([a-zA-Z0-9_\.]+)",
+        r"instagram\.com/([a-zA-Z0-9_\.]+)/?(?:\?|$)",
         r"instagram\.com/reel/([a-zA-Z0-9_\-]+)",
         r"instagram\.com/p/([a-zA-Z0-9_\-]+)",
+        r"instagram\.com/reels/([a-zA-Z0-9_\-]+)",
     ]
     for p in patterns:
         m = re.search(p, url)
@@ -94,10 +99,25 @@ def safe_filename(name: str, ext: str = ".mp4") -> str:
     return f"{name}_{uuid.uuid4().hex[:8]}{ext}"
 
 
-# ---------------- INSTAGRAM ----------------
+async def resolve_short_url(url: str, client: httpx.AsyncClient) -> str:
+    """Resolve vm.tiktok.com / vt.tiktok.com / short Instagram links"""
+    try:
+        resp = await client.head(url, follow_redirects=True, timeout=10.0)
+        final = str(resp.url)
+        if final and final != url:
+            print(f"Resolved short URL: {url} → {final}")
+            return final
+    except Exception as e:
+        print(f"Short URL resolve failed: {e}")
+    return url
+
+
+# ----------------------------------------------------
+# INSTAGRAM ENGINE
+# ----------------------------------------------------
 async def get_instagram_user_id(username: str, client: httpx.AsyncClient) -> Optional[str]:
     if not RAPIDAPI_KEY:
-        raise HTTPException(status_code=500, detail="RAPIDAPI_KEY missing on server.")
+        return None
     try:
         resp = await client.get(
             f"https://{RAPIDAPI_HOST}/profile",
@@ -152,44 +172,66 @@ async def get_instagram_reels(user_id: str, client: httpx.AsyncClient, count: in
 
 
 async def extract_instagram(url: str, client: httpx.AsyncClient) -> Dict[str, Any]:
-    if "/reel/" in url or "/p/" in url or "/tv/" in url:
-        if RAPIDAPI_KEY:
-            try:
-                resp = await client.get(
-                    f"https://{RAPIDAPI_HOST}/post",
-                    params={"url": url},
-                    headers={"x-rapidapi-key": RAPIDAPI_KEY, "x-rapidapi-host": RAPIDAPI_HOST},
-                    timeout=15.0
-                )
-                data = resp.json()
-                video = (
-                    data.get("video_url") or data.get("video") or
-                    ((data.get("items") or [{}])[0].get("video_versions") or [{}])[0].get("url") or
-                    (data.get("media") or {}).get("video_url")
-                )
-                if video:
-                    return {
-                        "status": "success",
-                        "source": "rapidapi-post",
-                        "title": data.get("caption") or data.get("title") or "Instagram Reel",
-                        "thumbnail": data.get("thumbnail") or data.get("display_url"),
-                        "download_url": video
-                    }
-            except Exception as e:
-                print(f"IG post error: {e}")
-        return {"status": "error", "message": "Instagram single reel needs valid RAPIDAPI_KEY"}
+    # Single reel / post
+    if "/reel/" in url or "/reels/" in url or "/p/" in url or "/tv/" in url:
+        if not RAPIDAPI_KEY:
+            return {
+                "status": "error",
+                "message": "Instagram single reel download ke liye RAPIDAPI_KEY set karni hogi Render Environment Variables mein. Key lo: https://rapidapi.com/search/instagram"
+            }
 
+        try:
+            resp = await client.get(
+                f"https://{RAPIDAPI_HOST}/post",
+                params={"url": url},
+                headers={"x-rapidapi-key": RAPIDAPI_KEY, "x-rapidapi-host": RAPIDAPI_HOST},
+                timeout=18.0
+            )
+            data = resp.json()
+            video = (
+                data.get("video_url") or data.get("video") or
+                ((data.get("items") or [{}])[0].get("video_versions") or [{}])[0].get("url") or
+                (data.get("media") or {}).get("video_url") or
+                ((data.get("data") or {}).get("video_versions") or [{}])[0].get("url")
+            )
+            if video:
+                return {
+                    "status": "success",
+                    "source": "rapidapi-post",
+                    "title": data.get("caption") or data.get("title") or "Instagram Reel",
+                    "thumbnail": data.get("thumbnail") or data.get("display_url"),
+                    "download_url": video
+                }
+        except Exception as e:
+            print(f"IG post error: {e}")
+            return {
+                "status": "error",
+                "message": f"Instagram reel extract fail. RAPIDAPI_KEY check karo ya RapidAPI quota khatam ho sakta hai. Error: {str(e)}"
+            }
+
+        return {
+            "status": "error",
+            "message": "Instagram reel extract fail. RAPIDAPI_KEY check karo ya RapidAPI quota khatam ho sakta hai."
+        }
+
+    # Profile → reels list
     username = extract_instagram_username(url)
     if not username:
         return {"status": "error", "message": "Invalid Instagram URL"}
 
+    if not RAPIDAPI_KEY:
+        return {
+            "status": "error",
+            "message": "Instagram profile reels ke liye RAPIDAPI_KEY set karni hogi Render Environment Variables mein."
+        }
+
     user_id = await get_instagram_user_id(username, client)
     if not user_id:
-        return {"status": "error", "message": "User ID not found. Check RAPIDAPI_KEY."}
+        return {"status": "error", "message": "User ID nahi mila. Username galat hai ya RAPIDAPI_KEY invalid hai."}
 
     links = await get_instagram_reels(user_id, client)
     if not links:
-        return {"status": "error", "message": "No reels found."}
+        return {"status": "error", "message": "Is profile pe koi reels nahi mile."}
 
     return {
         "status": "success",
@@ -202,15 +244,27 @@ async def extract_instagram(url: str, client: httpx.AsyncClient) -> Dict[str, An
     }
 
 
-# ---------------- TIKTOK ----------------
+# ----------------------------------------------------
+# TIKTOK ENGINE (Improved)
+# ----------------------------------------------------
 async def extract_tiktok(url: str, client: httpx.AsyncClient) -> Dict[str, Any]:
     errors = []
+
+    # Resolve short links first
+    if "vm.tiktok.com" in url or "vt.tiktok.com" in url:
+        url = await resolve_short_url(url, client)
+
+    # 1. tikwm.com
     try:
         resp = await client.get(
             "https://www.tikwm.com/api/",
             params={"url": url, "hd": 1},
-            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
-            timeout=12.0
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json",
+                "Referer": "https://www.tikwm.com/"
+            },
+            timeout=15.0
         )
         data = resp.json()
         if data.get("code") == 0 and data.get("data"):
@@ -225,17 +279,21 @@ async def extract_tiktok(url: str, client: httpx.AsyncClient) -> Dict[str, Any]:
                     "download_url": video_url,
                     "duration": d.get("duration")
                 }
+        else:
+            errors.append(f"tikwm: code={data.get('code')} msg={data.get('msg')}")
     except Exception as e:
-        errors.append(f"tikwm: {e}")
+        errors.append(f"tikwm: {str(e)}")
 
+    # 2. tiklydown
     try:
         resp = await client.get(
             "https://api.tiklydown.eu.org/api/download",
             params={"url": url},
-            timeout=12.0
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=15.0
         )
         data = resp.json()
-        video_url = data.get("video_hd") or data.get("video") or data.get("download")
+        video_url = data.get("video_hd") or data.get("video") or data.get("download") or data.get("play")
         if video_url:
             return {
                 "status": "success",
@@ -244,13 +302,67 @@ async def extract_tiktok(url: str, client: httpx.AsyncClient) -> Dict[str, Any]:
                 "thumbnail": data.get("cover") or data.get("thumbnail"),
                 "download_url": video_url
             }
+        errors.append("tiklydown: no video field")
     except Exception as e:
-        errors.append(f"tiklydown: {e}")
+        errors.append(f"tiklydown: {str(e)}")
 
-    return {"status": "error", "message": "All TikTok sources failed", "errors": errors}
+    # 3. tikmate
+    try:
+        resp = await client.get(
+            f"https://api.tikmate.app/api/lookup?url={url}",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=12.0
+        )
+        data = resp.json()
+        video_url = data.get("video") or data.get("nwm_video_url") or data.get("video_url")
+        if video_url:
+            return {
+                "status": "success",
+                "source": "tikmate",
+                "title": data.get("desc") or "TikTok Video",
+                "thumbnail": data.get("cover"),
+                "download_url": video_url
+            }
+    except Exception as e:
+        errors.append(f"tikmate: {str(e)}")
+
+    # 4. ssstik (HTML parse)
+    try:
+        resp = await client.post(
+            "https://ssstik.io/abc?url=dl",
+            data={"id": url, "locale": "en", "tt": "RFV0Y2E_"},
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Origin": "https://ssstik.io",
+                "Referer": "https://ssstik.io/"
+            },
+            timeout=15.0
+        )
+        text = resp.text
+        m = re.search(r'href=[](https://[^"]+\.mp4[^"]*)"', text)
+        if m:
+            return {
+                "status": "success",
+                "source": "ssstik",
+                "title": "TikTok Video",
+                "thumbnail": None,
+                "download_url": m.group(1)
+            }
+        errors.append("ssstik: no mp4 found")
+    except Exception as e:
+        errors.append(f"ssstik: {str(e)}")
+
+    return {
+        "status": "error",
+        "message": "Sab TikTok sources fail ho gaye. Short link try karo ya baad mein try karo.",
+        "errors": errors
+    }
 
 
-# ---------------- FACEBOOK ----------------
+# ----------------------------------------------------
+# FACEBOOK ENGINE
+# ----------------------------------------------------
 async def try_fdownloader(url: str, client: httpx.AsyncClient) -> Optional[Dict]:
     try:
         resp = await client.post(
@@ -258,10 +370,10 @@ async def try_fdownloader(url: str, client: httpx.AsyncClient) -> Optional[Dict]
             data={"q": url},
             headers={
                 "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": "Mozilla/5.0",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "X-Requested-With": "XMLHttpRequest"
             },
-            timeout=15.0
+            timeout=18.0
         )
         data = resp.json()
         if data.get("status") == "ok" and "links" in data:
@@ -289,7 +401,7 @@ async def try_getfvid(url: str, client: httpx.AsyncClient) -> Optional[Dict]:
                 "User-Agent": "Mozilla/5.0",
                 "X-Requested-With": "XMLHttpRequest"
             },
-            timeout=15.0
+            timeout=18.0
         )
         data = resp.json()
         if data.get("status") == "ok" and "links" in data:
@@ -308,17 +420,24 @@ async def try_getfvid(url: str, client: httpx.AsyncClient) -> Optional[Dict]:
 
 
 async def extract_facebook(url: str, client: httpx.AsyncClient) -> Dict[str, Any]:
+    errors = []
     for name, func in [("Fdownloader", try_fdownloader), ("Getfvid", try_getfvid)]:
         try:
-            result = await asyncio.wait_for(func(url, client), timeout=18.0)
+            result = await asyncio.wait_for(func(url, client), timeout=20.0)
             if result and result.get("status") == "success":
                 return result
         except Exception as e:
-            print(f"{name}: {e}")
-    return {"status": "error", "message": "All Facebook sources failed"}
+            errors.append(f"{name}: {str(e)}")
+    return {
+        "status": "error",
+        "message": "Sab Facebook sources fail ho gaye. Valid Facebook/Reels URL try karo.",
+        "errors": errors
+    }
 
 
-# ---------------- SAVE ----------------
+# ----------------------------------------------------
+# SAVE TO DISK
+# ----------------------------------------------------
 async def save_video_to_disk(video_url: str, title: str = "video") -> Dict[str, str]:
     filename = safe_filename(title)
     filepath = DOWNLOADS_DIR / filename
@@ -346,13 +465,19 @@ async def save_video_to_disk(video_url: str, title: str = "video") -> Dict[str, 
     }
 
 
+# ----------------------------------------------------
+# CORE ROUTER
+# ----------------------------------------------------
 async def process_url(url: str, platform: str = "auto") -> Dict[str, Any]:
     if platform == "auto":
         platform = detect_platform(url)
     if platform == "unknown":
-        raise HTTPException(status_code=400, detail="Only Instagram, TikTok, Facebook supported.")
+        raise HTTPException(
+            status_code=400,
+            detail="Sirf Instagram, TikTok aur Facebook links support hain. Twitter/X nahi."
+        )
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         if platform == "instagram":
             result = await extract_instagram(url, client)
         elif platform == "tiktok":
@@ -364,16 +489,19 @@ async def process_url(url: str, platform: str = "auto") -> Dict[str, Any]:
     return result
 
 
-# ---------------- ENDPOINTS ----------------
+# ----------------------------------------------------
+# API ENDPOINTS
+# ----------------------------------------------------
 @app.get("/health")
 async def health():
     return {
         "status": "online",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "service": "bharatclouddeveloper-unified",
         "platforms": ["instagram", "tiktok", "facebook"],
         "timestamp": datetime.utcnow().isoformat() + "Z",
-        "rapidapi_key_set": bool(RAPIDAPI_KEY)
+        "rapidapi_key_set": bool(RAPIDAPI_KEY),
+        "message": "RAPIDAPI_KEY set karo Instagram ke liye" if not RAPIDAPI_KEY else "All good"
     }
 
 
@@ -390,7 +518,10 @@ async def api_download_get(
 ):
     result = await process_url(url, platform)
     if result.get("status") != "success":
-        raise HTTPException(status_code=500, detail=result.get("message") or "Extraction failed")
+        detail = result.get("message") or "Extraction failed"
+        if result.get("errors"):
+            detail += " | " + " | ".join(result["errors"][:2])
+        raise HTTPException(status_code=500, detail=detail)
 
     response = {
         "status": "success",
@@ -418,7 +549,10 @@ async def api_download_get(
 async def api_download_post(body: DownloadRequest):
     result = await process_url(body.url, body.platform or "auto")
     if result.get("status") != "success":
-        raise HTTPException(status_code=500, detail=result.get("message") or "Extraction failed")
+        detail = result.get("message") or "Extraction failed"
+        if result.get("errors"):
+            detail += " | " + " | ".join(result["errors"][:2])
+        raise HTTPException(status_code=500, detail=detail)
 
     response = {
         "status": "success",
@@ -449,7 +583,8 @@ async def list_platforms():
             {"id": "instagram", "name": "Instagram Reels / Profile", "needs_key": True},
             {"id": "tiktok", "name": "TikTok", "needs_key": False},
             {"id": "facebook", "name": "Facebook / FB Watch", "needs_key": False},
-        ]
+        ],
+        "rapidapi_key_set": bool(RAPIDAPI_KEY)
     }
 
 
@@ -461,6 +596,9 @@ async def serve_file(filename: str):
     return FileResponse(filepath, media_type="video/mp4", filename=filename)
 
 
+# ----------------------------------------------------
+# FRONTEND
+# ----------------------------------------------------
 HOME_HTML = """
 <!DOCTYPE html>
 <html lang="en">
@@ -491,7 +629,7 @@ HOME_HTML = """
         .btns a{flex:1;text-align:center;padding:12px;border-radius:10px;text-decoration:none;font-weight:600;font-size:14px;color:#fff}
         .dl{background:linear-gradient(135deg,#10b981,#059669)}
         .prev{background:linear-gradient(135deg,#3b82f6,#2563eb)}
-        .error{display:none;background:#7f1d1d;color:#fecaca;padding:12px;border-radius:10px;margin-top:12px;font-size:14px}
+        .error{display:none;background:#7f1d1d;color:#fecaca;padding:12px;border-radius:10px;margin-top:12px;font-size:14px;word-break:break-word}
         .meta{font-size:12px;color:#a78bfa;margin-bottom:6px}
         footer{text-align:center;margin-top:20px;font-size:11px;color:#666}
     </style>
@@ -499,7 +637,7 @@ HOME_HTML = """
 <body>
 <div class="card">
     <h1>🇮🇳 Bharat Cloud Developer</h1>
-    <p class="sub">Instagram • TikTok • Facebook Downloader</p>
+    <p class="sub">Instagram • TikTok • Facebook Downloader v1.1</p>
     <div class="platforms">
         <span class="tag">📸 Instagram</span>
         <span class="tag">🎵 TikTok</span>
@@ -565,10 +703,11 @@ document.getElementById('url').addEventListener('keypress',e=>{if(e.key==='Enter
 
 def start():
     import uvicorn
-    print("🚀 Bharat Cloud Developer Unified Server starting...")
+    print("🚀 Bharat Cloud Developer Unified Server v1.1 starting...")
     print(f"📍 Health → http://0.0.0.0:{PORT}/health")
     print(f"📍 Web UI → http://0.0.0.0:{PORT}/")
     print(f"📍 Docs   → http://0.0.0.0:{PORT}/docs")
+    print(f"🔑 RAPIDAPI_KEY set: {bool(RAPIDAPI_KEY)}")
     uvicorn.run(app, host="0.0.0.0", port=PORT)
 
 
