@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: bharatcloud-downloader
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m bharatclouddeveloper.server
+    envVars:
+      - key: RAPIDAPI_KEY
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.11.0"
